@@ -13,6 +13,7 @@
 # limitations under the License.
 #
 # SPDX-License-Identifier: Apache-2.0
+import json
 import os
 import time
 import warnings
@@ -101,8 +102,9 @@ class PayloadGenerator:
             schema = schemathesis.from_path(
                 file, data_generation_methods=[DataGenerationMethod.positive]
             )
-            self.parse_http_methods(
-                schema=schema, start=time.time(), timeout=timeout)
+            with open("{}/data/{}.ndjson".format(self.args.out_folder, str(file).replace("/", "-")), "w") as f:
+                self.parse_http_methods(
+                    schema=schema, start=time.time(), timeout=timeout, f=f)
             end = time.time()
             self.log.info(f"Success in {round(end - start, 2)} seconds")
         except Exception:
@@ -148,7 +150,7 @@ class PayloadGenerator:
         case_attr = dict(case_attr)
         return case_attr
 
-    def parse_http_methods(self, schema: BaseOpenAPISchema, start: float, timeout: int):
+    def parse_http_methods(self, schema: BaseOpenAPISchema, start: float, timeout: int, f):
         """instantiate synthetic request payload and choose data providers for a given openapi spec"""
 
         @settings(
@@ -160,7 +162,7 @@ class PayloadGenerator:
         )
         @given(data=st.data())
         @schema.parametrize()
-        def generate_fake_data(data: st.DataObject, method) -> None:
+        def generate_fake_data(data: st.DataObject, method, f) -> None:
             # choose default strategies (data generators in hypothesis) based on schema of api path
             strategy = method.as_strategy()
             # replace default strategies with custom providers via before_generate_case hook in hooks.py,
@@ -168,14 +170,25 @@ class PayloadGenerator:
             # matched with appropriate data providers to instantiate unique synthetic payloads
             case = data.draw(strategy)
             # write generated request parameters to csv
-            self.route.write_payload_to_csv(
+            payload_paths = self.route.write_payload_to_csv(
                 case.path_parameters, self.hook.has_pii(
                     ParamType.PATH), self.hook.get_pii_types(ParamType.PATH)
             )
-            self.route.write_payload_to_csv(
+            payload_queries = self.route.write_payload_to_csv(
                 case.query, self.hook.has_pii(
                     ParamType.QUERY), self.hook.get_pii_types(ParamType.QUERY)
             )
+
+            parsed_payload_path = []
+            parsed_payload_query = []
+
+            for payload_path in payload_paths or []:
+                parsed_payload_path.append(json.loads(payload_path.fake))
+            for payload_query in payload_queries or []:
+                parsed_payload_query.append(json.loads(payload_query.fake))
+
+            self.route.write_api_payload(method, parsed_payload_path, parsed_payload_query, f)
+
             # ------ EQUALIZE PII DISTRIBUTION ------
             # often in pii requests, the parameters are not given pii keywords for security reasons
             # to account for this we insert additional random pii fields in requests we know contain pii
@@ -187,7 +200,7 @@ class PayloadGenerator:
                 method = schema[path].get(http_type, None)
                 if method:
                     try:
-                        generate_fake_data(method)
+                        generate_fake_data(method, f)
                         if time.time() - start > timeout:
                             self.log.warning(
                                 f"HTTP method of OpenAPI spec took too long to parse. Timeout of {timeout} reached.")

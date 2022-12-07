@@ -15,10 +15,91 @@
 # SPDX-License-Identifier: Apache-2.0
 import json
 import logging
+
+import urllib.parse
+import random
+
 from dicttoxml import dicttoxml
 from json2html import json2html
 from privy.sql import SQLQueryBuilder
 from privy.generate.utils import PrivyFileType
+
+
+API_TEMPLATE = r"""
+{{
+    "traceID": "ddb97daa1d99ae6e",
+    "spanID": "5712e5cb3a6bcf3b",
+    "operationName": "{operation}",
+    "references": [],
+    "startTime": 1662667661000000,
+    "startTimeMillis": 1662667661000,
+    "duration": 0,
+    "tags": [
+        {{
+            "key": "asap.sensor",
+            "type": "string",
+            "value": "pixie"
+        }},
+        {{
+            "key": "asap.cluster_id",
+            "type": "string",
+            "value": "aaa"
+        }},
+        {{
+            "key": "connection.dst_ip",
+            "type": "string",
+            "value": "10.0.0.1"
+        }},
+        {{
+            "key": "connection.dst_port",
+            "type": "int64",
+            "value": "443"
+        }},
+        {{
+            "key": "http.method",
+            "type": "string",
+            "value": "{http_method}"
+        }},
+        {{
+            "key": "http.url",
+            "type": "string",
+            "value": "{url}"
+        }},
+        {{
+            "key": "http.status_code",
+            "type": "int64",
+            "value": "200"
+        }},
+        {{
+            "key": "asap.anomaly_detected.block.based.model",
+            "type": "bool",
+            "value": "false"
+        }},
+        {{
+            "key": "asap.anomaly_detected.sequence.lstm",
+            "type": "bool",
+            "value": "false"
+        }},
+        {{
+            "key": "asap.anomaly_detected",
+            "type": "bool",
+            "value": "false"
+        }}
+    ],
+    "logs": [
+        {{
+            "timestamp": 1662667661000000,
+            "fields": [
+                {{
+                    "key": "response_body",
+                    "type": "string",
+                    "value": "<removed: unknown content-type>"
+                }}
+            ]
+        }}
+    ],
+}}
+"""
 
 
 class PayloadRoute:
@@ -55,6 +136,7 @@ class PayloadRoute:
             return
         has_pii_str = str(int(has_pii))
         pii_types_str = ",".join(set(pii_types))
+        all_spans = []
         for generate_type, privy_writers in self.file_writers.items():
             # convert case template (dict) to other types (json, sql, xml), and then to str for template parsing
             converter, kwargs = self.conversions.get(generate_type, None)
@@ -81,6 +163,30 @@ class PayloadRoute:
                 if writer.file_type == PrivyFileType.SPANS:
                     for span in payload_spans:
                         writer.open_file.write(f"{span.toJSON()}\n")
+            all_spans.extend(payload_spans)
+        return all_spans
+
+    def write_api_payload(self, method, parsed_payload_paths, parsed_payload_queries, f):
+        for parsed_payload_path in parsed_payload_paths:
+            converted = method.path
+            for path_placeholder, value in parsed_payload_path.items() if parsed_payload_path else {}:
+                converted = converted.replace("{{{}}}".format(path_placeholder), urllib.parse.quote(value))
+
+            if "{" in converted:
+                return
+
+            query_string_pieces = ["?"] if parsed_payload_queries else []
+            parsed_payload_query = random.choice(parsed_payload_queries) if parsed_payload_queries else {}
+            for query_placeholder, value in parsed_payload_query.items():
+                query_string_pieces.append("{}={}".format(query_placeholder, value))
+
+            http_method = method.method.upper()
+            url = "{}{}".format(converted, "&".join(query_string_pieces))
+            operation = "{} {}".format(http_method, url)
+
+            span = API_TEMPLATE.format(operation=operation, url=url, http_method=http_method)
+
+            f.write("{}\n".format(json.dumps(json.loads(span))))
 
 
 class PayloadFuzzer:
